@@ -1,0 +1,31 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model SiteMeta {
+  id              Int        @id @default(autoincrement())
+  siteName        String
+  url             String
+  wrapperSelector String
+  titleSelector   String
+  anchorSelector  String
+  timeSelector    String
+  Articles        Article[]
+}
+
+model Article {
+  id     Int      @id @default(autoincrement())
+  title  String
+  url    String
+  time   String
+  site   SiteMeta @relation(fields: [siteId], references: [id])
+  siteId Int
+}

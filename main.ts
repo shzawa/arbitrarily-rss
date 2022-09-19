@@ -1,42 +1,84 @@
 import { chromium } from 'playwright';
-import { writeJsonFile } from 'write-json-file';
+import { PrismaClient } from '@prisma/client'
+
+const prisma = new PrismaClient()
 
 ;(async () => {
-  const browser = await chromium.launch({ headless: false });
-  const page = await browser.newPage()
-  await page.goto('https://techblog.yahoo.co.jp/')
-  await page.waitForLoadState('networkidle');
-
-  const wrapperDiv = await page.$('#entry-list')
-  if (!wrapperDiv) {
-    console.log('wrapperDiv が見つからない...')
-    await browser.close()
+  const siteMetaList = await prisma.siteMeta.findMany()
+  if (siteMetaList.length <= 0) {
+    console.log('prisma.siteMeta.findFirst() が空でした')
+    await prisma.$disconnect()
     return
   }
 
-  const headlineElements = await wrapperDiv.$$('h3')
-  const headlines = await Promise.all(headlineElements.map(element => element.innerText()))
+  const browser = await chromium.launch({ headless: false });
 
-  const anchorElements = await wrapperDiv.$$('a')
-  const anchors = await Promise.all(anchorElements.map(element => element.getAttribute('href')))
+  for(const siteMeta of siteMetaList) {
+    const page = await browser.newPage()
+    await page.goto(siteMeta.url)
+    await page.waitForLoadState('domcontentloaded');
 
-  const timeElements = await wrapperDiv.$$('time')
-  const times = await Promise.all(timeElements.map(async element => {
-    const attr = await element.getAttribute('dateTime')
-    const text = await element.innerText()
-    return attr || text
-  }))
-  if (times)
+    const wrapperDiv = await page.$(siteMeta.wrapperSelector)
+    if (!wrapperDiv) {
+      console.log(`${siteMeta.siteName} の wrapperDiv (${siteMeta.wrapperSelector}) が見つかりませんでした`)
+      continue
+    }
 
-  console.log({headlines, anchors, times: times.map(time => time ? new Date(time).toLocaleDateString('ja-JP') : time)})
+    const titleElements = await wrapperDiv.$$(siteMeta.titleSelector)
+    const titles = await Promise.all(titleElements.map(element => element.innerText()))
 
-  const filename = `${new URL('https://techblog.yahoo.co.jp/').hostname}.json`
-  const newArrivals = headlines.map((headline, index) => ({
-    headline,
-    anchor: anchors[index],
-    time: times[index]
-  }))
-  writeJsonFile(filename, newArrivals, { indent: '  ' })
+    const anchorElements = await wrapperDiv.$$(siteMeta.anchorSelector)
+    const urlsNullable = await Promise.all(anchorElements.map(async element => element.getAttribute('href')))
+    const urls = urlsNullable.map(url => url || '')
 
-  await browser.close()
+    console.log('siteMeta.timeSelector', siteMeta.timeSelector)
+
+    // const timeElements = await wrapperDiv.$$(siteMeta.timeSelector)
+    // const timesNullable = await Promise.all(timeElements.map(async element => element.getAttribute('dateTime')))
+
+    // const times = await Promise.all(timesNullable.filter((element) => element === null).map((_, index) => timeElements[index].innerText()))
+    const times = titles.map(() => '')// timesNullable.map(time => time || '')
+
+    const newArrivals = titles.map((title, index) => ({
+      title,
+      url: urls[index],
+      time: new Date(times[index]).toLocaleDateString('ja-JP')
+    }))
+
+    const existArticles = await prisma.article.findMany({
+      where: {
+        OR: newArrivals.map(article => ({
+          url: article.url
+        }))
+      }
+    })
+
+    console.dir(existArticles, { depth: null })
+
+    const insertNewArrivals = existArticles.length > 0 ? newArrivals.filter((article, index) => !existArticles[index] && article.url !== existArticles[index].url) : newArrivals
+
+    console.log({insertNewArrivals})
+
+    if (insertNewArrivals.length <= 0) continue
+
+    const queries = insertNewArrivals.map(article => (
+      prisma.article.create({
+        data: {
+          ...article,
+          site: {
+            connect: {
+              id: siteMeta.id
+            }
+          }
+        },
+      })
+    ))
+
+    await prisma.$transaction([...queries])
+  }
+
+  await Promise.all([
+    prisma.$disconnect(),
+    browser.close()
+  ])
 })()
